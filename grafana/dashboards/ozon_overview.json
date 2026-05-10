@@ -1,0 +1,204 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT count() AS value FROM ozon.postings WHERE account IN (${account:sqlstring})",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Всего собрано отправлений",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT count() AS value FROM ozon.products WHERE account IN (${account:sqlstring})",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Товаров в каталоге",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 600}, {"color": "red", "value": 1800}]}}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT toUInt32(dateDiff('second', max(ingested_at), now())) AS value FROM ozon.postings WHERE account IN (${account:sqlstring})",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Лаг сбора (сек с последней записи)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "center", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT count() AS value FROM ozon.raw_events WHERE account IN (${account:sqlstring})",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Сырых событий",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "pointSize": 4, "showPoints": "auto", "spanNulls": false}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 4},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT toStartOfMinute(ingested_at) AS time, concat(account, '/', scheme) AS series, count() AS postings FROM ozon.postings WHERE $__timeFilter(ingested_at) AND account IN (${account:sqlstring}) GROUP BY time, series ORDER BY time",
+          "refId": "A",
+          "format": 0
+        }
+      ],
+      "title": "Поток поступления отправлений (account / scheme)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "custom": {"align": "auto"}}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 4},
+      "id": 6,
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT region, count() AS postings, sum(items_count) AS items, round(sum(toFloat64(total_price)), 2) AS revenue FROM ozon.postings WHERE region != '' AND account IN (${account:sqlstring}) GROUP BY region ORDER BY postings DESC LIMIT 20",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Топ регионов",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 13},
+      "id": 7,
+      "options": {"displayLabels": ["percent"], "legend": {"displayMode": "list", "placement": "right", "showLegend": true}, "pieType": "donut", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "tooltip": {"mode": "single"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT status, count() AS value FROM ozon.postings WHERE account IN (${account:sqlstring}) GROUP BY status ORDER BY value DESC",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Распределение статусов",
+      "type": "piechart"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "custom": {"align": "auto"}}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 13},
+      "id": 8,
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT created_at, account, posting_number, scheme, status, region, city, items_count, total_price FROM ozon.postings WHERE account IN (${account:sqlstring}) ORDER BY created_at DESC LIMIT 50",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Последние отправления",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "custom": {"align": "auto"}}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 22},
+      "id": 9,
+      "options": {"showHeader": true},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+          "editorType": "sql",
+          "rawSql": "SELECT account, count() AS postings, uniqExact(region) AS regions, uniqExact(city) AS cities, max(ingested_at) AS last_seen FROM ozon.postings WHERE account IN (${account:sqlstring}) GROUP BY account ORDER BY postings DESC",
+          "refId": "A",
+          "format": 1
+        }
+      ],
+      "title": "Сводка по аккаунтам",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ozon", "shr"],
+  "templating": {
+    "list": [
+      {
+        "name": "account",
+        "label": "Аккаунт",
+        "type": "query",
+        "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ClickHouse"},
+        "query": "SELECT DISTINCT account FROM ozon.postings UNION DISTINCT SELECT DISTINCT account FROM ozon.products",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "%",
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "sort": 1
+      }
+    ]
+  },
+  "time": {"from": "now-7d", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ozon — система сбора данных",
+  "uid": "shr-ozon",
+  "version": 1,
+  "weekStart": ""
+}

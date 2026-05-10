@@ -1,0 +1,9 @@
+.env
+accounts.json
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.DS_Store
+data/
+*.log

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "main",
+    "client_id": "REPLACE_ME",
+    "api_key": "REPLACE_ME"
+  },
+  {
+    "name": "warehouse2",
+    "client_id": "REPLACE_ME",
+    "api_key": "REPLACE_ME"
+  }
+]
