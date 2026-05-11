@@ -1,4 +1,12 @@
 services:
+  redpanda-permissions:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: shr-redpanda-permissions
+    user: "0"
+    entrypoint: ["chown", "-R", "101:101", "/var/lib/redpanda/data"]
+    volumes:
+      - ./data/redpanda:/var/lib/redpanda/data
+
   redpanda:
     image: redpandadata/redpanda:v24.2.7
     container_name: shr-redpanda
@@ -22,6 +30,9 @@ services:
       retries: 10
     volumes:
       - ./data/redpanda:/var/lib/redpanda/data
+    depends_on:
+      redpanda-permissions:
+        condition: service_completed_successfully
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -65,6 +76,14 @@ services:
       timeout: 5s
       retries: 10
 
+  grafana-permissions:
+    image: grafana/grafana:11.3.0
+    container_name: shr-grafana-permissions
+    user: "0"
+    entrypoint: ["chown", "-R", "472:0", "/var/lib/grafana"]
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+
   collector:
     build: ./collector
     container_name: shr-collector
@@ -104,3 +123,5 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      grafana-permissions:
+        condition: service_completed_successfully

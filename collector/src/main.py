@@ -75,6 +75,20 @@ async def collect_account(
 
         for source in sources:
             since = cursors.get((account.name, source.name), default_since)
+            if (
+                source.name == "product"
+                and (account.name, source.name) in cursors
+                and (now - since).total_seconds() < settings.products_refresh_interval_seconds
+            ):
+                log.info(
+                    "source.skipped_refresh_interval",
+                    account=account.name,
+                    source=source.name,
+                    next_allowed_at=(
+                        since + timedelta(seconds=settings.products_refresh_interval_seconds)
+                    ).isoformat(),
+                )
+                continue
             try:
                 result = await source.fetch(since=since, to=now)
             except Exception as e:
@@ -88,12 +102,22 @@ async def collect_account(
                 if source.name == "product"
                 else settings.kafka_topic_postings
             )
-            for rec in result.normalized:
+            for idx, rec in enumerate(result.normalized):
+                raw_record = (
+                    result.raw_records[idx]
+                    if idx < len(result.raw_records)
+                    else rec
+                )
                 key = f"{account.name}:{rec.get('posting_number') or rec.get('sku') or ''}"
                 kafka.send(
                     topic,
                     key,
-                    {"account": account.name, "source": source.name, "data": rec},
+                    {
+                        "account": account.name,
+                        "source": source.name,
+                        "data": rec,
+                        "raw": raw_record,
+                    },
                 )
 
             log.info(

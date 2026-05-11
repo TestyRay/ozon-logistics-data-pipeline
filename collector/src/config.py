@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     poll_interval_seconds: int = 300
     initial_lookback_days: int = 7
+    products_refresh_interval_seconds: int = 86400
 
     kafka_bootstrap: str = "redpanda:9092"
     kafka_topic_postings: str = "ozon.postings"
@@ -28,8 +29,6 @@ class Settings(BaseSettings):
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "ozon-raw"
-
-    anonymization_salt: str = "change_me"
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 

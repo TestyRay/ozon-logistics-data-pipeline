@@ -7,13 +7,13 @@ CREATE TABLE IF NOT EXISTS ozon.raw_events
     account      LowCardinality(String),       -- логическое имя кабинета продавца
     source       LowCardinality(String),       -- 'fbs' | 'fbo' | 'product'
     entity_id    String,                       -- posting_number / sku
-    payload      String CODEC(ZSTD(3))         -- сырой JSON (без ПДн)
+    payload      String CODEC(ZSTD(3))         -- сырой JSON как получен от Ozon API
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ingested_at)
 ORDER BY (account, source, ingested_at, entity_id);
 
--- Заказы / отправления (postings) — обезличенные
+-- Заказы / отправления (postings)
 CREATE TABLE IF NOT EXISTS ozon.postings
 (
     account          LowCardinality(String),
@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS ozon.postings
     items_count      UInt32,
     total_price      Decimal(18, 2),
     currency         LowCardinality(String),
-    buyer_hash       String,
     ingested_at      DateTime64(3) DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingested_at)
@@ -55,6 +54,35 @@ CREATE TABLE IF NOT EXISTS ozon.posting_items
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 ORDER BY (account, posting_number, sku);
+
+-- Геоданные отправлений из исходного ответа Ozon API без справочников
+CREATE TABLE IF NOT EXISTS ozon.posting_geo
+(
+    account            LowCardinality(String),
+    posting_number     String,
+    scheme             LowCardinality(String),
+    region             LowCardinality(String),
+    city               LowCardinality(String),
+    address_country    LowCardinality(String),
+    address_region     LowCardinality(String),
+    address_city       LowCardinality(String),
+    address_district   String,
+    address_tail       String CODEC(ZSTD(3)),
+    zip_code           String,
+    latitude           Nullable(Float64),
+    longitude          Nullable(Float64),
+    pvz_code           String,
+    provider_pvz_code  String,
+    warehouse_id       Nullable(UInt64),
+    warehouse_name     LowCardinality(String),
+    delivery_method    LowCardinality(String),
+    tpl_provider       LowCardinality(String),
+    geo_source         LowCardinality(String),
+    ingested_at        DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(ingested_at)
+PARTITION BY toYYYYMM(ingested_at)
+ORDER BY (account, posting_number, scheme);
 
 -- Каталог товаров продавца
 CREATE TABLE IF NOT EXISTS ozon.products

@@ -1,152 +1,1142 @@
-# Система сбора данных Ozon
+# Система сбора логистических данных Ozon
 
-Учебный программный комплекс для практической работы №2 по дисциплине «Системы сбора больших пространственных данных». Назначение - собирать данные о заказах и товарах сразу с нескольких кабинетов продавца Ozon, обезличивать их, складывать в потоковое и долговременное хранилище, а также показывать ход сбора и общие показатели на интерактивном дашборде.
+Учебный программный комплекс для практической работы по теме сбора больших пространственных данных. Система подключается к Ozon Seller API, забирает данные по отправлениям FBS/FBO и каталогу товаров, сохраняет полный сырой слой, нормализует данные в ClickHouse и показывает аналитику в Grafana.
+
+Проект рассчитан на демонстрацию полного процесса сбора данных:
+
+- получение данных из внешнего API;
+- хранение сырого слоя без изменений;
+- потоковая передача событий через Kafka-совместимый брокер;
+- нормализация данных в аналитические таблицы;
+- хранение геоданных, если они реально пришли из API;
+- визуализация в Grafana;
+- работа в Docker Compose как набор отдельных сервисов.
+
+## Важное предупреждение
+
+Сейчас проект сохраняет ответы Ozon API как есть. Данные не обезличиваются, не шифруются и не вырезаются.
+
+Это значит, что в MinIO могут попадать реальные данные из личного кабинета продавца, включая адресные поля, телефоны, имена получателей и другие чувствительные значения, если Ozon возвращает их в ответе API.
 
 ## Архитектура
 
+Общая схема:
+
+```text
+Ozon Seller API
+    |
+    v
+collector
+    |\
+    | \-> MinIO: полный сырой слой в NDJSON
+    |
+    v
+Redpanda: Kafka-совместимые топики
+    |
+    v
+consumer
+    |
+    v
+ClickHouse
+    |
+    v
+Grafana
 ```
-Ozon Seller API → коллектор → Kafka (Redpanda) → потребитель → ClickHouse → Grafana
-                       │
-                       └────────→ MinIO (сырые данные в формате NDJSON, без персональных сведений)
+
+Смысл компонентов:
+
+- `collector` - Python-сервис, который обращается к Ozon Seller API.
+- `Redpanda` - Kafka-совместимый брокер сообщений между сервисами `collector` и `consumer`.
+- `consumer` - Python-сервис, который читает сообщения из Redpanda и пишет нормализованные строки в ClickHouse.
+- `ClickHouse` - аналитическая БД для быстрых запросов и панелей дашборда.
+- `MinIO` - объектное хранилище для полного сырого слоя Ozon API.
+- `Grafana` - интерфейс визуализации и проверки результата.
+
+Почему так сделано:
+
+- сырой слой нужен, чтобы можно было перепроверить исходный ответ API и переобработать данные;
+- Kafka/Redpanda показывает потоковую архитектуру, а не прямую запись из API в БД;
+- ClickHouse подходит для аналитических запросов по большому числу строк;
+- Grafana позволяет быстро показать преподавателю результат в виде дашборда;
+- Docker Compose позволяет поднять всю систему одной командой.
+
+## Какие Ozon API методы используются
+
+Система использует только методы чтения Ozon Seller API. Физически запросы идут через HTTP POST, но это нормальный формат Ozon API для методов чтения.
+
+Методы для отправлений:
+
+```text
+/v3/posting/fbs/list
+/v2/posting/fbo/list
 ```
 
-Назначение каждого компонента:
+Методы для каталога товаров:
 
-- Коллектор - служба на языке Python. Опрашивает Ozon Seller API по списку кабинетов. Для каждого кабинета сам определяет доступные схемы торговли (FBS и FBO) и собирает только те, к которым у ключа есть доступ.
-- Kafka в реализации Redpanda - потоковая шина между коллектором и потребителем. Все события заказов и сведения о товарах проходят через неё.
-- MinIO - хранилище сырого слоя. Все ответы Ozon API целиком, с предварительно вырезанными персональными сведениями, сохраняются в формате NDJSON, разложенные по кабинету, источнику, дате и часу.
-- Потребитель - служба на языке Python. Читает сообщения из Kafka, нормализует их и записывает в ClickHouse партиями.
-- ClickHouse - основное хранилище. Содержит таблицы отправлений, позиций отправлений, товаров, сырых событий и метрик работы коллектора.
-- Grafana - графический интерфейс. Содержит дашборд «Система сбора данных Ozon» со счётчиками, графиками потока сбора, разрезами по регионам и сводкой по кабинетам.
+```text
+/v3/product/list
+/v3/product/info/list
+```
 
-## Работа сразу с несколькими кабинетами
+## Что такое FBS и FBO
 
-Коллектор поддерживает сбор данных с произвольного числа кабинетов продавца Ozon. Список кабинетов задаётся в файле `accounts.json` в корне проекта. Этот файл внесён в `.gitignore` и не попадает в систему контроля версий. Образец содержимого находится в файле `accounts.example.json`.
+`FBS` - схема, при которой продавец сам хранит товар и передаёт заказ в доставку Ozon.
 
-Формат файла - массив объектов, каждый из которых описывает один кабинет:
+`FBO` - схема, при которой товар хранится на складе Ozon, а Ozon сам собирает и доставляет заказ.
+
+В системе оба источника сохраняются в одной логической модели отправлений, но поле `scheme` показывает источник:
+
+```text
+fbs
+fbo
+```
+
+## Какие данные собираются
+
+### Отправления
+
+Источник:
+
+```text
+/v3/posting/fbs/list
+/v2/posting/fbo/list
+```
+
+Нормализованная таблица:
+
+```text
+ozon.postings
+```
+
+Поля:
+
+```text
+account
+posting_number
+scheme
+status
+created_at
+in_process_at
+shipment_date
+delivering_date
+region
+city
+warehouse_id
+warehouse_name
+delivery_method
+tpl_provider
+items_count
+total_price
+currency
+ingested_at
+```
+
+Что означает:
+
+- `account` - логическое имя кабинета из `accounts.json`.
+- `posting_number` - номер отправления Ozon.
+- `scheme` - схема, `fbs` или `fbo`.
+- `status` - статус отправления.
+- `created_at` - дата создания или попадания в обработку.
+- `in_process_at` - дата начала обработки.
+- `shipment_date` - дата отгрузки.
+- `delivering_date` - дата доставки, если есть.
+- `region` и `city` - регион и город из `analytics_data`.
+- `warehouse_id` и `warehouse_name` - склад, если Ozon вернул эти данные.
+- `delivery_method` - способ доставки.
+- `tpl_provider` - логистический провайдер.
+- `items_count` - количество товаров внутри отправления.
+- `total_price` - сумма по отправлению.
+- `currency` - валюта.
+- `ingested_at` - когда строка попала в ClickHouse.
+
+### Товары внутри отправлений
+
+Источник - блок `products` внутри отправлений FBS/FBO.
+
+Нормализованная таблица:
+
+```text
+ozon.posting_items
+```
+
+Поля:
+
+```text
+account
+posting_number
+sku
+offer_id
+name
+quantity
+price
+currency
+ingested_at
+```
+
+Что означает:
+
+- `posting_number` связывает позицию с отправлением.
+- `sku` - Ozon SKU.
+- `offer_id` - артикул продавца.
+- `name` - название товара.
+- `quantity` - количество единиц товара в отправлении.
+- `price` - цена позиции.
+- `currency` - валюта.
+
+### Геоданные отправлений
+
+Источник - реальные поля из сырого JSON Ozon API.
+
+Нормализованная таблица:
+
+```text
+ozon.posting_geo
+```
+
+Поля:
+
+```text
+account
+posting_number
+scheme
+region
+city
+address_country
+address_region
+address_city
+address_district
+address_tail
+zip_code
+latitude
+longitude
+pvz_code
+provider_pvz_code
+warehouse_id
+warehouse_name
+delivery_method
+tpl_provider
+geo_source
+ingested_at
+```
+
+Что важно:
+
+- `latitude` и `longitude` сохраняются только если Ozon API реально вернул координаты.
+- `address_tail`, `zip_code`, `pvz_code` и другие адресные поля сохраняются только если есть в сыром JSON.
+- `geo_source` показывает, откуда взяты геополя: например `customer.address`, `analytics_data` или исходный объект ответа API.
+
+Практический вывод:
+
+- `posting_geo` может содержать строку для каждого отправления;
+- карта в Grafana отображает только строки, где есть `latitude` и `longitude`;
+- таблица `Геоданные отправлений из Ozon API` сейчас тоже отфильтрована по наличию координат.
+
+### Каталог товаров
+
+Источники:
+
+```text
+/v3/product/list
+/v3/product/info/list
+```
+
+Нормализованная таблица:
+
+```text
+ozon.products
+```
+
+Поля:
+
+```text
+account
+sku
+offer_id
+name
+category_id
+price
+currency
+visible
+archived
+updated_at
+ingested_at
+```
+
+Что означает:
+
+- `sku` - идентификатор товара.
+- `offer_id` - артикул продавца.
+- `name` - название товара.
+- `category_id` - категория.
+- `price` - цена.
+- `visible` - видимость товара.
+- `archived` - архивный товар или нет.
+- `updated_at` - дата обновления из Ozon или дата создания, если обновления нет.
+
+### Сырой слой
+
+Сырой слой сохраняется в двух местах.
+
+В MinIO:
+
+```text
+ozon-raw/accounts/<account>/<source>/dt=<YYYY-MM-DD>/hr=<HH>/<timestamp>.ndjson
+```
+
+В ClickHouse:
+
+```text
+ozon.raw_events
+```
+
+Поля `ozon.raw_events`:
+
+```text
+ingested_at
+account
+source
+entity_id
+payload
+```
+
+Что означает:
+
+- `source` - `fbs`, `fbo` или `product`.
+- `entity_id` - номер отправления или SKU.
+- `payload` - полный JSON, полученный от Ozon API.
+
+Формат NDJSON:
+
+```text
+одна строка = один JSON-объект
+```
+
+Пример проверки через ClickHouse без вывода самих персональных данных:
+
+```sql
+SELECT
+    source,
+    count() AS rows,
+    avg(length(payload)) AS avg_payload_bytes
+FROM ozon.raw_events
+GROUP BY source
+ORDER BY source;
+```
+
+## Как работает сервис сбора данных
+
+Сервис `collector` выполняет полный цикл сбора.
+
+Шаги:
+
+1. Загружает список кабинетов из `accounts.json`.
+2. Для каждого кабинета создаёт клиент Ozon API.
+3. Проверяет доступность методов FBS и FBO.
+4. Берёт курсор последней обработки из MinIO.
+5. Если курсор отсутствует, использует `INITIAL_LOOKBACK_DAYS`.
+6. Загружает FBS отправления постранично.
+7. Загружает FBO отправления постранично.
+8. Сохраняет полный сырой JSON в MinIO.
+9. Отправляет нормализованные записи и сырой JSON в топик Kafka.
+10. Загружает каталог товаров через `/v3/product/list` и `/v3/product/info/list`.
+11. Сохраняет курсоры в MinIO `_state/cursors.json`.
+12. Засыпает на `POLL_INTERVAL_SECONDS` и повторяет цикл.
+
+Состояние курсоров хранится здесь:
+
+```text
+ozon-raw/_state/cursors.json
+```
+
+Важный момент про `INITIAL_LOOKBACK_DAYS`:
+
+- параметр применяется только при запуске проекта, когда курсор отсутствует;
+- если `_state/cursors.json` уже существует, `collector` продолжит с последней сохранённой точки;
+- чтобы новый `INITIAL_LOOKBACK_DAYS` реально применился, нужно очистить состояние в MinIO.
+
+## Как работает сервис обработки данных
+
+Сервис `consumer` читает сообщения из Redpanda и пишет данные в ClickHouse.
+
+Топики Kafka:
+
+```text
+ozon.postings
+ozon.products
+```
+
+Сервис `consumer` делает следующие действия:
+
+1. Читает пакет сообщений из Redpanda.
+2. Декодирует JSON через `orjson`.
+3. Для отправлений пишет строки в `ozon.postings`.
+4. Для товаров внутри отправлений пишет строки в `ozon.posting_items`.
+5. Из сырого JSON извлекает геоданные и пишет `ozon.posting_geo`.
+6. Полный сырой JSON пишет в `ozon.raw_events`.
+7. Для каталога товаров пишет `ozon.products`.
+8. После успешной записи подтверждает обработку сообщений в Kafka.
+
+Параметры пакетной обработки:
+
+```text
+BATCH_SIZE
+BATCH_TIMEOUT_MS
+```
+
+Они находятся в `consumer/src/config.py` и могут задаваться через `.env`, если нужно.
+
+## Таблицы ClickHouse
+
+### `ozon.raw_events`
+
+Назначение - хранение полного JSON от Ozon API.
+
+Используется для:
+
+- аудита;
+- проверки исходного ответа;
+- повторной обработки данных;
+- поиска новых полей API;
+- демонстрации архитектуры с сырым слоем данных.
+
+### `ozon.postings`
+
+Назначение - основная аналитическая таблица отправлений.
+
+Используется для:
+
+- счётчика отправлений;
+- статусов;
+- регионов;
+- FBS/FBO разреза;
+- таблицы последних отправлений;
+- расчёта потока поступления данных.
+
+### `ozon.posting_items`
+
+Назначение - детализация товаров внутри отправлений.
+
+Используется для анализа состава заказов.
+
+### `ozon.posting_geo`
+
+Назначение - нормализованные пространственные и адресные данные отправлений.
+
+Используется для:
+
+- таблицы геоданных;
+- карты реальных координат из Ozon API;
+- анализа регионов, городов, ПВЗ и складов.
+
+### `ozon.products`
+
+Назначение - каталог товаров продавца.
+
+Используется для:
+
+- счётчика товаров;
+- проверки полноты каталога;
+- дальнейшей товарной аналитики.
+
+### `ozon.collector_runs`
+
+Таблица заложена в схему для метрик запусков сервиса `collector`. В текущей реализации основной процесс пишет данные в остальные таблицы, а `collector_runs` оставлена как задел под расширение.
+
+## Дашборд Grafana
+
+Дашборд доступен по адресу:
+
+```text
+http://localhost:3000/d/shr-ozon/ozon-e28094-sistema-sbora-dannyh
+```
+
+Логин и пароль:
+
+```text
+admin / admin
+```
+
+Дашборд использует источник данных `ClickHouse`.
+
+Переменная:
+
+```text
+account
+```
+
+Она позволяет выбрать один кабинет, несколько кабинетов или все сразу.
+
+### Всего собрано отправлений
+
+Показывает:
+
+```sql
+SELECT count() FROM ozon.postings
+```
+
+Это количество нормализованных FBS/FBO отправлений.
+
+### Товаров в каталоге
+
+Показывает:
+
+```sql
+SELECT count() FROM ozon.products
+```
+
+Это количество товаров, полученных из Ozon API для товаров.
+
+Запрос использует `FINAL`, чтобы ClickHouse показывал актуальное состояние каталога после повторных загрузок:
+
+```sql
+SELECT count()
+FROM ozon.products FINAL
+```
+
+### Топ товаров по количеству в отправлениях
+
+Таблица показывает товары, которые чаще всего встречались внутри собранных отправлений.
+
+Источник данных:
+
+```text
+ozon.posting_items
+```
+
+Поля панели:
+
+```text
+sku
+offer_id
+name
+sold_qty
+postings
+revenue
+currency
+```
+
+Что означают расчётные поля:
+
+- `sold_qty` - суммарное количество единиц товара в отправлениях;
+- `postings` - количество уникальных отправлений с этим товаром;
+- `revenue` - сумма `price * quantity` по позициям товара.
+
+Ограничение:
+
+```text
+LIMIT 20
+```
+
+### Топ товаров по выручке в отправлениях
+
+Таблица показывает товары с наибольшей суммой по позициям внутри отправлений.
+
+Источник данных:
+
+```text
+ozon.posting_items
+```
+
+Расчёт:
+
+```sql
+sum(price * quantity)
+```
+
+Это аналитическая сумма по тем ценам и количествам, которые пришли в блоке товаров внутри отправлений.
+
+Ограничение:
+
+```text
+LIMIT 20
+```
+
+### Статус каталога товаров
+
+Таблица показывает распределение товаров из каталога по состоянию:
+
+```text
+archived
+visible
+not_visible
+```
+
+Правило расчёта:
+
+```sql
+multiIf(archived = 1, 'archived', visible = 1, 'visible', 'not_visible')
+```
+
+Если Ozon API вернул `visible = 0` для всех товаров, панель покажет один статус `not_visible`. Это не ошибка Grafana, а прямое отражение данных из API.
+
+### Каталог товаров из Ozon API
+
+Таблица показывает последние 1000 товаров из нормализованного каталога.
+
+Поля панели:
+
+```text
+sku
+offer_id
+name
+category_id
+price
+currency
+visible
+archived
+updated_at
+ingested_at
+```
+
+Ограничение:
+
+```text
+LIMIT 1000
+```
+
+Полный каталог хранится в таблице:
+
+```text
+ozon.products
+```
+
+### Лаг сбора
+
+Показывает, сколько секунд прошло с последней записи в `ozon.postings`.
+
+Важно:
+
+- это не задержка Ozon API;
+- это задержка между текущим временем и последним `ingested_at` в ClickHouse.
+
+### Сырых событий
+
+Показывает число строк в `ozon.raw_events`.
+
+Сюда входят:
+
+```text
+fbs
+fbo
+product
+```
+
+### Поток поступления отправлений
+
+Показывает, сколько отправлений было записано в ClickHouse по минутам.
+
+Используемое время:
+
+```text
+ingested_at
+```
+
+Это время поступления данных в систему, а не время создания заказа в Ozon.
+
+Если после очистки и первого запуска график показывает высокий пик, это нормально: система за один прогон загрузила историческое окно данных.
+
+### Топ регионов
+
+Показывает топ регионов по числу отправлений.
+
+Используется поле:
+
+```text
+region
+```
+
+Панель ограничена:
+
+```text
+LIMIT 20
+```
+
+### Распределение статусов
+
+Круговая диаграмма по статусам отправлений.
+
+Используется запрос:
+
+```sql
+SELECT status, count() AS value
+FROM ozon.postings
+GROUP BY status
+ORDER BY value DESC
+```
+
+В панели включена трансформация `rowsToFields`, чтобы каждый статус отображался отдельным сектором, а не как один столбец `value`.
+
+### Последние отправления
+
+Таблица последних отправлений.
+
+Ограничение:
+
+```text
+LIMIT 1000
+```
+
+Это не все строки, а последние 1000 по `created_at`.
+
+Всего отправлений может быть больше. Полный набор данных находится в `ozon.postings`.
+
+### Сводка по аккаунтам
+
+Показывает по каждому аккаунту:
+
+```text
+postings
+regions
+cities
+last_seen
+```
+
+Нужна для проверки нескольких кабинетов.
+
+### Геоданные отправлений из Ozon API
+
+Таблица геоданных, где есть реальные координаты.
+
+Фильтр:
+
+```sql
+latitude IS NOT NULL
+AND longitude IS NOT NULL
+```
+
+Ограничение:
+
+```text
+LIMIT 1000
+```
+
+Если Ozon вернул координаты только у части отправлений, таблица будет меньше общего числа отправлений.
+
+### Карта реальных координат из Ozon API
+
+Показывает точки только по строкам, где есть:
+
+```text
+latitude
+longitude
+```
+
+Координаты берутся только из Ozon API.
+
+Если у нескольких отправлений одинаковые координаты, точки могут визуально накладываться друг на друга.
+
+## Подготовка к запуску
+
+Требования:
+
+- Linux или WSL2;
+- Docker;
+- плагин Docker Compose;
+- доступ к Ozon Seller API;
+- `client_id` и `api_key` продавца Ozon.
+
+Создайте файлы настроек:
+
+```bash
+cp .env.example .env
+cp accounts.example.json accounts.json
+```
+
+Заполните `accounts.json`:
 
 ```json
 [
-  {"name": "основной",  "client_id": "123", "api_key": "ключ_первого_кабинета"},
-  {"name": "запасной",  "client_id": "456", "api_key": "ключ_второго_кабинета"}
+  {
+    "name": "kant",
+    "client_id": "ВАШ_CLIENT_ID",
+    "api_key": "ВАШ_API_KEY"
+  }
 ]
 ```
 
-Поле `name` - логическое имя кабинета. Это имя попадает в колонку `account` всех таблиц ClickHouse, а также в путь к файлам сырого слоя в MinIO (например, `accounts/основной/fbs/...`). Имена кабинетов должны быть уникальными.
+Поле `name` можно выбрать любое. Оно будет отображаться в Grafana и ClickHouse как `account`.
 
-Коллектор обходит кабинеты последовательно, чтобы не превысить ограничения Ozon API на число запросов в единицу времени. Для каждого кабинета отдельно отслеживается отметка последней обработанной записи по каждому источнику данных. Эти отметки хранятся в MinIO и сохраняются между перезапусками. Добавление нового кабинета не приводит к повторной обработке данных по уже подключённым.
+Заполните `.env` при необходимости:
 
-В дашборде Grafana добавлена переменная «Аккаунт» с возможностью множественного выбора. Можно смотреть данные одного кабинета, нескольких выбранных или всех сразу.
+```env
+INITIAL_LOOKBACK_DAYS=7
+POLL_INTERVAL_SECONDS=300
+PRODUCTS_REFRESH_INTERVAL_SECONDS=86400
+```
 
-## Защита персональных данных
+## Основные настройки `.env`
 
-Перед тем как записать данные в Kafka или в MinIO, коллектор выполняет два действия:
+### `INITIAL_LOOKBACK_DAYS`
 
-1. Удаляет из ответа все поля, похожие на персональные сведения покупателя - имя, фамилия, отчество, телефон, адрес доставки, индекс, дом, корпус, квартира, штрихкод, комментарий и другие. Список полей задан в файле `collector/src/anonymize.py`.
-2. Для возможности отслеживать уникальность покупателя без раскрытия его личности коллектор вычисляет хеш по алгоритму SHA-256 от соли и набора идентификаторов (внутренний идентификатор покупателя, телефон, номер заказа). В таблицах сохраняется только этот хеш, в колонке `buyer_hash`.
+На сколько дней назад `collector` смотрит при первом запуске без сохранённого состояния курсоров.
 
-Соль задаётся в файле `.env` в переменной `ANONYMIZATION_SALT`. Если соль изменить, повторно сопоставить хеши с прежними данными нельзя. По этой причине соль рекомендуется задавать один раз и не менять её в ходе эксплуатации.
+Пример:
+
+```env
+INITIAL_LOOKBACK_DAYS=7
+```
+
+Если состояние курсоров уже есть, изменение этого параметра не перезапустит историческую загрузку. Нужно очистить в MinIO файл `_state/cursors.json`.
+
+### `POLL_INTERVAL_SECONDS`
+
+Пауза между циклами сервиса `collector`.
+
+Пример:
+
+```env
+POLL_INTERVAL_SECONDS=300
+```
+
+Это значит, что `collector` повторяет сбор примерно раз в 5 минут.
+
+### `PRODUCTS_REFRESH_INTERVAL_SECONDS`
+
+Как часто обновлять полный каталог товаров.
+
+Пример:
+
+```env
+PRODUCTS_REFRESH_INTERVAL_SECONDS=86400
+```
+
+Это значит, что каталог товаров обновляется примерно раз в сутки. Это сделано потому, что загрузка каталога тяжёлая и может возвращать десятки тысяч товаров.
+
+### `MINIO_BUCKET`
+
+Бакет для сырого слоя.
+
+По умолчанию:
+
+```env
+MINIO_BUCKET=ozon-raw
+```
 
 ## Запуск
 
-1. Подготовить файлы настроек.
+Запустить весь проект:
 
-   ```bash
-   cp .env.example .env
-   cp accounts.example.json accounts.json
-   ```
+```bash
+docker compose up -d --build
+```
 
-   В файле `accounts.json` подставить значения `client_id` и `api_key` для каждого кабинета. В файле `.env` рекомендуется задать новое значение `ANONYMIZATION_SALT` - произвольную случайную строку.
+Проверить контейнеры:
 
-2. Поднять весь набор служб одной командой.
+```bash
+docker compose ps
+```
 
-   ```bash
-   docker compose up -d --build
-   ```
+Ожидаемые сервисы:
 
-3. Открыть графические интерфейсы:
+```text
+shr-redpanda
+shr-clickhouse
+shr-minio
+shr-collector
+shr-consumer
+shr-grafana
+```
 
-   - Grafana - по адресу `http://localhost:3000`. Имя пользователя `admin`, пароль `admin`.
-   - Консоль MinIO - по адресу `http://localhost:9091`. Имя пользователя `minioadmin`, пароль `minioadmin`.
-   - Веб-интерфейс ClickHouse - по адресу `http://localhost:18123/play`.
+Посмотреть логи сервиса `collector`:
 
-4. Посмотреть журнал работы коллектора:
+```bash
+docker compose logs -f collector
+```
 
-   ```bash
-   docker compose logs -f collector
-   ```
+Посмотреть логи сервиса `consumer`:
 
-   В первых строках после старта должны появиться записи `source.enabled` для тех схем, к которым у ключей кабинетов есть доступ. Для недоступных схем будет запись `source.disabled_no_permission` - это не ошибка, а нормальное поведение, если у кабинета подключена только одна схема торговли.
+```bash
+docker compose logs -f consumer
+```
 
-## Полезные запросы к ClickHouse
+Открыть Grafana:
+
+```text
+http://localhost:3000
+```
+
+Открыть MinIO:
+
+```text
+http://localhost:9091
+```
+
+Открыть веб-интерфейс ClickHouse Play:
+
+```text
+http://localhost:18123/play
+```
+
+## Как понять, что загрузка завершилась
+
+В логах сервиса `collector` должны появиться строки вида:
+
+```text
+source.completed source=fbs
+source.completed source=fbo
+source.completed source=product
+```
+
+Для товаров важно увидеть:
+
+```text
+source.completed product raw=<N> normalized=<N>
+```
+
+Проверить количество строк в ClickHouse:
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --query "
+SELECT 'raw_events' AS table, count() FROM ozon.raw_events
+UNION ALL SELECT 'postings', count() FROM ozon.postings
+UNION ALL SELECT 'posting_items', count() FROM ozon.posting_items
+UNION ALL SELECT 'posting_geo', count() FROM ozon.posting_geo
+UNION ALL SELECT 'products', count() FROM ozon.products
+"
+```
+
+Проверить отставание потребителя Kafka:
+
+```bash
+docker compose exec -T redpanda rpk group describe shr-consumer
+```
+
+Если `TOTAL-LAG` равен `0`, сервис `consumer` догнал очередь.
+
+## Как смотреть сырые данные
+
+### Через интерфейс MinIO
+
+Откройте:
+
+```text
+http://localhost:9091
+```
+
+Логин и пароль:
+
+```text
+minioadmin / minioadmin
+```
+
+Путь к файлам сырого слоя:
+
+```text
+ozon-raw/accounts/<account>/<source>/dt=<YYYY-MM-DD>/hr=<HH>/...
+```
+
+Примеры:
+
+```text
+ozon-raw/accounts/kant/fbs/dt=2026-05-11/hr=14/...
+ozon-raw/accounts/kant/fbo/dt=2026-05-11/hr=14/...
+ozon-raw/accounts/kant/product/dt=2026-05-11/hr=14/...
+```
+
+Скачанный файл имеет формат `.ndjson`.
+
+### Почему на диске `.ndjson` выглядит как папка
+
+Если открыть `data/minio/...` напрямую в файловой системе, MinIO может показывать объект как директорию с файлами:
+
+```text
+xl.meta
+part.1
+```
+
+Это внутренний формат хранения MinIO. Правильно смотреть файлы сырого слоя через интерфейс MinIO или через MinIO API, а не редактировать `part.1` руками.
+
+### Через ClickHouse
+
+Посмотреть последние сырые события без вывода полного JSON:
 
 ```sql
--- сколько собрано в разрезе кабинета и схемы
-SELECT account, scheme, count()
-FROM ozon.postings
-GROUP BY account, scheme
-ORDER BY account, scheme;
-
--- почасовой профиль поступления заказов
-SELECT toStartOfHour(created_at) AS hour, account, count()
-FROM ozon.postings
-GROUP BY hour, account
-ORDER BY hour, account;
-
--- топ регионов по числу заказов
-SELECT region, count() AS orders
-FROM ozon.postings
-WHERE region != ''
-GROUP BY region
-ORDER BY orders DESC
+SELECT
+    ingested_at,
+    account,
+    source,
+    entity_id,
+    length(payload) AS payload_bytes
+FROM ozon.raw_events
+ORDER BY ingested_at DESC
 LIMIT 20;
 ```
 
-## Останов и очистка данных
+Посмотреть один полный JSON:
 
-Остановить все службы, сохранив накопленные данные:
+```sql
+SELECT payload
+FROM ozon.raw_events
+ORDER BY ingested_at DESC
+LIMIT 1;
+```
+
+## Полезные SQL-запросы
+
+Количество строк по основным таблицам:
+
+```sql
+SELECT 'raw_events' AS table, count() FROM ozon.raw_events
+UNION ALL SELECT 'postings', count() FROM ozon.postings
+UNION ALL SELECT 'posting_items', count() FROM ozon.posting_items
+UNION ALL SELECT 'posting_geo', count() FROM ozon.posting_geo
+UNION ALL SELECT 'products', count() FROM ozon.products;
+```
+
+Количество отправлений по FBS/FBO:
+
+```sql
+SELECT scheme, count() AS postings
+FROM ozon.postings
+GROUP BY scheme
+ORDER BY postings DESC;
+```
+
+Распределение статусов:
+
+```sql
+SELECT status, count() AS postings
+FROM ozon.postings
+GROUP BY status
+ORDER BY postings DESC;
+```
+
+Топ регионов:
+
+```sql
+SELECT region, count() AS postings
+FROM ozon.postings
+WHERE region != ''
+GROUP BY region
+ORDER BY postings DESC
+LIMIT 20;
+```
+
+Сколько строк имеют координаты:
+
+```sql
+SELECT
+    count() AS geo_rows,
+    countIf(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
+    countIf(address_tail != '') AS with_address_tail,
+    countIf(pvz_code != '') AS with_pvz
+FROM ozon.posting_geo;
+```
+
+Проверить последние отправления:
+
+```sql
+SELECT
+    created_at,
+    posting_number,
+    scheme,
+    status,
+    region,
+    city,
+    total_price
+FROM ozon.postings
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+## Очистка и повторный сбор
+
+### Остановить сервисы без удаления данных
 
 ```bash
 docker compose down
 ```
 
-Полностью снести все данные и начать с чистого состояния:
+Данные останутся в `data/`.
+
+### Полностью удалить все тома Docker проекта
+
+В проекте используются подключённые директории `data/`, поэтому для полной очистки нужно удалить эту директорию:
 
 ```bash
-docker compose down -v
+docker compose down
 rm -rf data/
 ```
 
-## Структура проекта
+После этого можно поднять проект заново:
 
+```bash
+docker compose up -d --build
 ```
-.
-├── docker-compose.yml                       - описание набора служб
-├── .env.example                             - образец общих настроек
-├── accounts.example.json                    - образец списка кабинетов
-├── clickhouse/
-│   └── init/01_schema.sql                   - таблицы ClickHouse
-├── collector/                               - служба сбора данных
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── src/
-│       ├── main.py                          - главный цикл
-│       ├── config.py                        - настройки и список кабинетов
-│       ├── ozon_client.py                   - обращение к Ozon Seller API
-│       ├── anonymize.py                     - удаление персональных полей и расчёт хеша
-│       ├── state.py                         - отметки обработки в MinIO
-│       ├── sources/
-│       │   ├── base.py
-│       │   ├── postings.py                  - единый источник для FBS и FBO
-│       │   └── products.py                  - каталог товаров
-│       └── sinks/
-│           ├── kafka_sink.py                - отправка в Kafka
-│           └── minio_sink.py                - запись сырого слоя в MinIO
-├── consumer/                                - служба разбора потока
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── src/main.py                          - чтение Kafka и запись в ClickHouse
-└── grafana/
-    ├── provisioning/                        - автоматическое подключение источника и дашбордов
-    └── dashboards/ozon_overview.json        - основной дашборд
+
+### Очистить только ClickHouse таблицы
+
+```bash
+docker compose exec -T clickhouse clickhouse-client --multiquery --query "
+TRUNCATE TABLE IF EXISTS ozon.raw_events;
+TRUNCATE TABLE IF EXISTS ozon.postings;
+TRUNCATE TABLE IF EXISTS ozon.posting_items;
+TRUNCATE TABLE IF EXISTS ozon.posting_geo;
+TRUNCATE TABLE IF EXISTS ozon.products;
+TRUNCATE TABLE IF EXISTS ozon.collector_runs;
+"
+```
+
+Но этого недостаточно для новой исторической загрузки, потому что курсоры останутся в MinIO.
+
+### Очистить сырой слой и курсоры в MinIO
+
+Если нужно, чтобы `INITIAL_LOOKBACK_DAYS` применился заново, нужно удалить объекты MinIO, включая `_state/cursors.json`.
+
+Команда:
+
+```bash
+docker compose run --rm --no-deps collector python - <<'PY'
+from minio import Minio
+from minio.error import S3Error
+from src.config import settings
+
+client = Minio(
+    settings.minio_endpoint,
+    access_key=settings.minio_access_key,
+    secret_key=settings.minio_secret_key,
+    secure=False,
+)
+try:
+    objects = list(client.list_objects(settings.minio_bucket, recursive=True))
+except S3Error as e:
+    if e.code == 'NoSuchBucket':
+        print('bucket_missing=1')
+        raise SystemExit(0)
+    raise
+for obj in objects:
+    client.remove_object(settings.minio_bucket, obj.object_name)
+print(f'removed_objects={len(objects)}')
+PY
+```
+
+### Правильный сценарий нового прогона с другим `INITIAL_LOOKBACK_DAYS`
+
+1. Изменить `.env`:
+
+```env
+INITIAL_LOOKBACK_DAYS=30
+```
+
+2. Остановить сервисы, которые пишут данные:
+
+```bash
+docker compose stop collector consumer
+```
+
+3. Очистить ClickHouse таблицы.
+
+4. Очистить бакет MinIO вместе с `_state/cursors.json`.
+
+5. Пересоздать сервисы `collector` и `consumer`:
+
+```bash
+docker compose up -d --force-recreate collector consumer
+```
+
+6. Смотреть логи:
+
+```bash
+docker compose logs -f collector consumer
 ```

@@ -8,7 +8,7 @@ from datetime import datetime
 @dataclass
 class FetchResult:
     source: str
-    raw_records: list[dict]      # to MinIO (scrubbed of PII)
+    raw_records: list[dict]      # to MinIO as received from Ozon API
     normalized: list[dict]       # to Kafka (already shaped for downstream)
     next_cursor: datetime | None # high-watermark to persist for next run
 

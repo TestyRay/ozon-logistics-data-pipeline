@@ -5,8 +5,6 @@ from typing import Any
 
 import structlog
 
-from ..anonymize import buyer_hash, scrub_pii
-from ..config import settings
 from ..ozon_client import OzonClient
 from .base import FetchResult, Source
 
@@ -57,7 +55,7 @@ class PostingsSource(Source):
             postings = postings or []
 
             for p in postings:
-                raw_all.append(scrub_pii(p))
+                raw_all.append(p)
                 norm = self._normalize(p)
                 normalized_all.append(norm)
                 created = _parse_dt(norm.get("created_at"))
@@ -103,14 +101,6 @@ class PostingsSource(Source):
                 }
             )
 
-        # обезличенный идентификатор покупателя
-        buyer_id = (
-            (p.get("customer") or {}).get("customer_id")
-            or (p.get("addressee") or {}).get("phone")
-            or p.get("order_id")
-        )
-        bh = buyer_hash(settings.anonymization_salt, buyer_id, p.get("posting_number"))
-
         return {
             "posting_number": str(p.get("posting_number") or ""),
             "scheme": self.scheme,
@@ -128,7 +118,6 @@ class PostingsSource(Source):
             "items_count": sum(it["quantity"] for it in items),
             "total_price": str(financial.get("total_price") or sum(_to_float(it["price"]) * it["quantity"] for it in items)),
             "currency": (items[0]["currency"] if items else "RUB"),
-            "buyer_hash": bh,
             "items": items,
         }
 

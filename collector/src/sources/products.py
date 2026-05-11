@@ -5,7 +5,6 @@ from typing import Any
 
 import structlog
 
-from ..anonymize import scrub_pii
 from ..ozon_client import OzonClient
 from .base import FetchResult, Source
 
@@ -50,14 +49,14 @@ class ProductsSource(Source):
                 "/v3/product/info/list", {"product_id": chunk}
             )
             for item in (data.get("items") or data.get("result", {}).get("items") or []):
-                raw_all.append(scrub_pii(item))
+                raw_all.append(item)
                 normalized_all.append(self._normalize(item))
 
         return FetchResult(
             source=self.name,
             raw_records=raw_all,
             normalized=normalized_all,
-            next_cursor=None,  # каталог снимаем целиком
+            next_cursor=to,
         )
 
     @staticmethod
